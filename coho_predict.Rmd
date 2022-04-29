@@ -1,0 +1,85 @@
+---
+title: "coho_project"
+output: html_document
+date: '2022-04-29'
+---
+
+```{r setup}
+
+library(rjags)
+library(coda)
+library(dplyr)
+library(ggplot2)
+
+coho <- read.csv("data/coho_aukbay.csv",header=T)
+covar <- read.csv("data/covars_aukbay.csv",header=T)
+
+```
+
+```{r data formatting}
+
+dat <- coho %>% group_by(calendar_year) %>% summarize(catch = sum(c(coho_troll_catch, coho_seine_catch, coho_gillnet_catch, coho_sport_catch)), fresh1 = X1.1_mean_length, fresh2 = X2.1_mean_length, jacks = coho_jack, coho = coho_adult, smolt = total_smolt)
+
+plot(dat$calendar_year, dat$fresh1) # size decreasing
+plot(dat$calendar_year, dat$fresh2) # size decreasing
+plot(dat$calendar_year, dat$jacks) # constant ish until 2015
+plot(dat$calendar_year, dat$coho) # constant ish until 2015
+plot(dat$calendar_year, dat$smolt) # decreasing ish
+plot(dat$calendar_year, dat$catch) # catch decreasing
+plot(covar$year, covar$hpc_release) # hatchery increasing
+plot(covar$year, covar$pdo_nov_jan) # random?
+plot(covar$year, covar$gauge_spring) # stream flow decreasing
+plot(dat$coho, dat$smolt) # maybe bev holt? ricker?
+
+```
+
+```{r running jags, plotting posterior}
+
+# linear model of coho/smolt
+
+# data
+dat2 <- list(coho = dat$coho, smolt = dat$smolt, n = length(dat$smolt))
+
+# priors
+dat2$b0 <- as.vector(c(0, 0))
+dat2$Vb <- solve(diag(10000, 2))
+dat2$s1 <- 0.1
+dat2$s2 <- 0.1
+
+# intial conditions
+inits = list(S = 1/var(dat2$smolt))
+
+# model
+reg <- "
+model{
+  b ~ dmnorm(b0, Vb)
+  S ~ dgamma(s1, s2)
+  
+  for(i in 1:n) {
+  mu[i] <- b[1] + b[2]*coho[i]
+  smolt[i] ~ dnorm(mu[i], S)
+  }
+}
+"
+
+# running jags
+j.model <- jags.model(file = textConnection(reg), 
+                      data = dat2, 
+                      inits = inits, 
+                      n.chains = 1)
+
+# coda samples
+jags.out <- coda.samples(model = j.model, 
+                         variable.names = c("b", "S"), 
+                         n.iter = 5000)
+
+plot(jags.out) # some converange things
+post <- as.matrix(jags.out) # note no burn in
+expect <- apply(post, 2, mean)
+plot(dat2$coho, dat2$smolt)
+abline(expect[2], expect[3]) # posterior expectation only
+plot(dat2$coho, dat2$smolt)
+for(i in 1:50) {abline(post[i, 2], post[i, 3], add=TRUE)} # set of posterior expectations
+
+```
+

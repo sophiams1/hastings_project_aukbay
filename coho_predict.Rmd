@@ -10,6 +10,7 @@ library(rjags)
 library(coda)
 library(dplyr)
 library(ggplot2)
+library(rethinking)
 
 coho <- read.csv("data/coho_aukbay.csv",header=T)
 covar <- read.csv("data/covars_aukbay.csv",header=T)
@@ -19,6 +20,8 @@ covar <- read.csv("data/covars_aukbay.csv",header=T)
 ```{r data formatting}
 
 dat <- coho %>% group_by(calendar_year) %>% summarize(catch = sum(c(coho_troll_catch, coho_seine_catch, coho_gillnet_catch, coho_sport_catch)), fresh1 = X1.1_mean_length, fresh2 = X2.1_mean_length, jacks = coho_jack, coho = coho_adult, smolt = total_smolt)
+
+dat$spring <- covar$gauge_spring
 
 plot(dat$calendar_year, dat$fresh1) # size decreasing
 plot(dat$calendar_year, dat$fresh2) # size decreasing
@@ -30,24 +33,23 @@ plot(covar$year, covar$hpc_release) # hatchery increasing
 plot(covar$year, covar$pdo_nov_jan) # random?
 plot(covar$year, covar$gauge_spring) # stream flow decreasing
 plot(dat$coho, dat$smolt) # maybe bev holt? ricker?
+plot(covar$gauge_spring, dat$coho) # increasing
+plot(covar$gauge_spring, dat$smolt) # increasing
 
 ```
 
-```{r running jags, plotting posterior}
+```{r rjags ricker with enviro, message=FALSE}
 
-# linear model of coho/smolt
+# ricker model of coho/smolt with enviro
 
 # data
-dat2 <- list(coho = dat$coho, smolt = dat$smolt, n = length(dat$smolt))
+dat2 <- list(coho = dat$coho, smolt = dat$smolt, es = dat$spring-21, n = length(dat$smolt))
 
 # priors
-dat2$b0 <- as.vector(c(0, 0))
-dat2$Vb <- solve(diag(10000, 2))
+dat2$b0 <- as.vector(c(2, 3000))
+dat2$Vb <- solve(diag(100, 2))
 dat2$s1 <- 0.1
 dat2$s2 <- 0.1
-
-# intial conditions
-inits = list(S = 1/var(dat2$smolt))
 
 # model
 reg <- "
@@ -56,30 +58,82 @@ model{
   S ~ dgamma(s1, s2)
   
   for(i in 1:n) {
-  mu[i] <- b[1] + b[2]*coho[i]
   smolt[i] ~ dnorm(mu[i], S)
+  mu[i] <- (coho[i])*(exp(b[1]*(1-(coho[i]/(b[2]*es[i])))))
   }
 }
-"
+" 
+
+# could also add hatchery*spring or something
+# is spring positive or neg?
 
 # running jags
 j.model <- jags.model(file = textConnection(reg), 
-                      data = dat2, 
-                      inits = inits, 
+                      data = dat2,
                       n.chains = 1)
 
 # coda samples
 jags.out <- coda.samples(model = j.model, 
                          variable.names = c("b", "S"), 
-                         n.iter = 5000)
+                         n.iter = 15000)
 
 plot(jags.out) # some converange things
+
 post <- as.matrix(jags.out) # note no burn in
-expect <- apply(post, 2, mean)
-plot(dat2$coho, dat2$smolt)
-abline(expect[2], expect[3]) # posterior expectation only
-plot(dat2$coho, dat2$smolt)
-for(i in 1:50) {abline(post[i, 2], post[i, 3], add=TRUE)} # set of posterior expectations
+effectiveSize(jags.out)
+
+expect <- apply(post, 2, mean) #means
+
+# data formatting
+dat_ord <- arrange(dat, coho)
+dat_ord$es <- dat_ord$spring-21
+x <- dat_ord$coho
+# plotting
+plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000))
+points(dat2$coho, dat2$smolt)
+for(i in 1:50) {points(x, (x)*(exp(post[i, 2]*(1-(x/(post[i, 3]*dat_ord$es))))), add=TRUE, col = col.alpha("blue", 0.2))} # set of posterior expectations... okay
+
+```
+
+```{r stan version plotting posterior, message=FALSE}
+
+# ricker model of coho/smolt with enviro
+
+# data
+dat2 <- list(Co = dat$coho, Sm = dat$smolt, ES = dat$spring-21)
+
+mod <- ulam(
+  alist(
+    
+    # outcome 
+    Sm ~ dnorm(mu, sig),
+    # priors
+    mu <- (Co)*(exp(a*(1-(Co/(b*ES))))),
+    sig ~ dexp(1),
+    # hyper priors -- multi-norm?
+    a ~ normal(2, 100),
+    b ~ normal(4000, 100)
+
+  ), data = dat2, chains = 1
+)
+
+precis(mod) # not great sampling -- increasing number of chains makes worse
+post <- extract.samples(mod)
+post <- data.frame(S = post$sig, a = post$a, b = post$b)
+expect <- apply(post, 2, mean) # means -- recall here sig is stdev, in jags sig is precision (and way worse, but more samples)
+
+dat_ord <- arrange(dat, coho)
+dat_ord$es <- dat_ord$spring-21
+x <- dat_ord$coho
+# plotting
+plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000))
+points(dat2$Co, dat2$Sm)
+for(i in 1:50) {points(x, (x)*(exp(post$a[i]*(1-(x/(post$b[i]*dat_ord$es))))), add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations... okay
+
+# prior departure? some
+hist(rnorm(length(post$b), 4000, 100), col = col.alpha("red"), xlim = c(3500, 4500))
+hist(post$b, add = TRUE, col = col.alpha("blue"))
+
 
 ```
 

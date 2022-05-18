@@ -12,17 +12,21 @@ library(dplyr)
 library(ggplot2)
 library(rethinking)
 
-coho <- read.csv("data/coho_aukbay.csv",header=T)
-covar <- read.csv("data/covars_aukbay.csv",header=T)
+coho <- read.csv("~/data/coho_aukbay.csv",header=T)
+covar <- read.csv("~/data/covars_aukbay.csv",header=T)
+# get temp data -- nws??
+# pdo v adults
 
 ```
 
 ```{r data formatting}
 
+#-------------dat prep------------
 dat <- coho %>% group_by(calendar_year) %>% summarize(catch = sum(c(coho_troll_catch, coho_seine_catch, coho_gillnet_catch, coho_sport_catch)), fresh1 = X1.1_mean_length, fresh2 = X2.1_mean_length, jacks = coho_jack, coho = coho_adult, smolt = total_smolt)
-
 dat$spring <- covar$gauge_spring
+dat$hatch <- covar$hpc_release
 
+#-------------exploratory plots--------------
 plot(dat$calendar_year, dat$fresh1) # size decreasing
 plot(dat$calendar_year, dat$fresh2) # size decreasing
 plot(dat$calendar_year, dat$jacks) # constant ish until 2015
@@ -40,29 +44,30 @@ plot(covar$gauge_spring, dat$smolt) # increasing
 
 ```{r rjags ricker with enviro, message=FALSE}
 
-# ricker model of coho/smolt with enviro
+#-------------data-------------
+dat2 <- list(coho = dat$coho, smolt = dat$smolt, es = dat$spring-21, hat = dat$hatch, n = length(dat$smolt))
 
-# data
-dat2 <- list(coho = dat$coho, smolt = dat$smolt, es = dat$spring-21, n = length(dat$smolt))
-
-# priors
+#-------------priors-------------
 dat2$b0 <- as.vector(c(2, 3000))
-dat2$Vb <- solve(diag(100, 2))
+dat2$Vb <- matrix(c(1, 0, 0, 100), nrow = 2)
 dat2$s1 <- 0.1
 dat2$s2 <- 0.1
+dat2$cmin <- 0
+dat2$cmax <- 1
 
-# model
+#-------------model-------------
 reg <- "
 model{
+  c1 ~ dunif(cmin, cmax)
+  c2 ~ dunif(cmin, cmax)
   b ~ dmnorm(b0, Vb)
   S ~ dgamma(s1, s2)
   
   for(i in 1:n) {
   smolt[i] ~ dnorm(mu[i], S)
-  mu[i] <- (coho[i])*(exp(b[1]*(1-(coho[i]/(b[2]*es[i])))))
-  }
-}
-" 
+  mu[i] <- c1*(coho[i])*(exp(b[1]*(1-(coho[i]/(b[2]*es[i]))))) + c2*hat[i]
+  }                                                 
+}" 
 
 # could also add hatchery*spring or something
 # is spring positive or neg?
@@ -70,13 +75,15 @@ model{
 # running jags
 j.model <- jags.model(file = textConnection(reg), 
                       data = dat2,
-                      n.chains = 1)
+                      n.chains = 2)
 
 # coda samples
 jags.out <- coda.samples(model = j.model, 
-                         variable.names = c("b", "S"), 
-                         n.iter = 15000)
+                         variable.names = c("b", "S", "c1", "c2"), 
+                         n.iter = 45000, 
+                         n.adapt = 10000)
 
+#-------------model checking and posterior-------------
 plot(jags.out) # some converange things
 
 post <- as.matrix(jags.out) # note no burn in
@@ -97,28 +104,53 @@ for(i in 1:50) {points(x, (x)*(exp(post[i, 2]*(1-(x/(post[i, 3]*dat_ord$es))))),
 
 ```{r stan version plotting posterior, message=FALSE}
 
-# ricker model of coho/smolt with enviro
-
-# data
+#-------------data-----------
 dat2 <- list(Co = dat$coho, Sm = dat$smolt, ES = dat$spring-21)
 
-mod <- ulam(
+#-------------model 1-----------
+mod1 <- ulam(
   alist(
     
     # outcome 
     Sm ~ dnorm(mu, sig),
     # priors
-    mu <- (Co)*(exp(a*(1-(Co/(b*ES))))),
+    mu <- (Co)*(exp(a*(1-(Co/(b))))), 
     sig ~ dexp(1),
-    # hyper priors -- multi-norm?
-    a ~ normal(2, 100),
-    b ~ normal(4000, 100)
-
-  ), data = dat2, chains = 1
+    # hyper priors
+    a ~ normal(2, 1),
+    b ~ normal(3000, 100)
+  ), data = dat2, chains = 1, iter = 4000, log_lik = TRUE
 )
 
-precis(mod) # not great sampling -- increasing number of chains makes worse
-post <- extract.samples(mod)
+precis(mod1) # not great sampling -- increasing number of chains makes worse
+post <- extract.samples(mod1)
+post <- data.frame(S = post$sig, a = post$a, b = post$b)
+expect <- apply(post, 2, mean) # means -- recall here sig is stdev, in jags sig is precision (and way worse, but more samples)
+
+dat_ord <- arrange(dat, coho)
+x <- dat_ord$coho
+# plotting
+plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
+points(dat2$Co, dat2$Sm)
+for(i in 1:50) {points(x, (x)*(exp(post$a[i]*(1-(x/(post$b[i]))))), add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations... okay
+
+#-------------model 2-----------
+mod2 <- ulam(
+  alist(
+    
+    # outcome 
+    Sm ~ dnorm(mu, sig),
+    # priors
+    mu <- (Co)*(exp(a*(1-(Co/(b*ES))))), 
+    sig ~ dexp(1),
+    # hyper priors
+    a ~ normal(2, 1),
+    b ~ normal(3000, 100)
+  ), data = dat2, chains = 1, iter = 4000, log_lik = TRUE
+)
+
+precis(mod2) # not great sampling -- increasing number of chains makes worse
+post <- extract.samples(mod2)
 post <- data.frame(S = post$sig, a = post$a, b = post$b)
 expect <- apply(post, 2, mean) # means -- recall here sig is stdev, in jags sig is precision (and way worse, but more samples)
 
@@ -126,7 +158,7 @@ dat_ord <- arrange(dat, coho)
 dat_ord$es <- dat_ord$spring-21
 x <- dat_ord$coho
 # plotting
-plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000))
+plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
 points(dat2$Co, dat2$Sm)
 for(i in 1:50) {points(x, (x)*(exp(post$a[i]*(1-(x/(post$b[i]*dat_ord$es))))), add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations... okay
 
@@ -134,6 +166,78 @@ for(i in 1:50) {points(x, (x)*(exp(post$a[i]*(1-(x/(post$b[i]*dat_ord$es))))), a
 hist(rnorm(length(post$b), 4000, 100), col = col.alpha("red"), xlim = c(3500, 4500))
 hist(post$b, add = TRUE, col = col.alpha("blue"))
 
+#-------------model 3----------
+dat2 <- list(Co = dat$coho, Sm = dat$smolt, ES = dat$spring-21, id = 1:length(dat$coho))
+
+mod3 <- ulam(
+  alist(
+    
+    # outcome 
+    Sm ~ dnorm(mu, sig),
+    # priors
+    mu <- (Co)*(exp(a*(1-(Co/(b*ES))))) + z[id], 
+    sig ~ dexp(1),
+    z[id] ~ normal(Z, phi),
+    # hyper priors
+    a ~ normal(3, 0.1),
+    b ~ normal(3000, 100), 
+    Z ~ normal(0, 10), 
+    phi ~ normal(0, 10)
+  ), data = dat2, chains = 1, iter = 5000, log_lik = TRUE
+)
+
+precis(mod3) # not great sampling -- increasing number of chains makes worse
+post <- extract.samples(mod3)
+
+dat_ord <- arrange(dat, coho)
+dat_ord$es <- dat_ord$spring-21
+dat_ord$z <- expect_z
+x <- dat_ord$coho
+# plotting
+plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
+points(dat2$Co, dat2$Sm)
+for(j in 1:40) {
+  for(i in 1:50) {points(x[j], (x[j])*(exp(post$a[i]*(1-(x[j]/(post$b[i]*dat_ord$es[j]))))) + post$z[i, j], add=TRUE, col = col.alpha("red", 0.2))
+  }# set of posterior expectations... okay
+}
+
+#-------------aic model comp: model 1 & 2----------
+compare(mod1, mod2, mod3)
+
+# r2 is 1-var(residuals)/var(data)
+dat_ord <- arrange(dat, coho)
+x <- dat_ord$coho
+
+# calculate residuals of expectation for each model
+# mod 1
+precis(mod1) # not great sampling -- increasing number of chains makes worse
+post1 <- extract.samples(mod1)
+expect_a <- mean(post1$a) 
+expect_b <- mean(post1$b)
+expect_smolt <- (x)*(exp(expect_a*(1-(x/(expect_b))))) 
+resid1 <- dat_ord$smolt - expect_smolt
+sE1 <- sd(resid1)/sqrt(length(resid1)) # 290.1
+
+# mod 2
+precis(mod2) # not great sampling -- increasing number of chains makes worse
+post2 <- extract.samples(mod2)
+expect_a <- mean(post2$a) 
+expect_b <- mean(post2$b)
+expect_smolt <- (x)*(exp(expect_a*(1-(x/(expect_b*dat_ord$es))))) 
+resid2 <- dat_ord$smolt - expect_smolt
+sE2 <- sd(resid2)/sqrt(length(resid2)) # 331.4
+
+# mod 3
+precis(mod3) # not great sampling -- increasing number of chains makes worse
+post3 <- extract.samples(mod3)
+expect_a <- mean(post3$a) 
+expect_b <- mean(post3$b)
+expect_z_vect <- apply(post3$z, 2, mean)
+for (i in 1:40) {
+expect_smolt[i] <- (x)*(exp(expect_a*(1-(x/(expect_b*dat_ord$es))))) + expect_z_vect[i]
+}
+resid3 <- dat_ord$smolt - expect_smolt
+sE3 <- sd(resid3)/sqrt(length(resid3)) # 277.2
 
 ```
 

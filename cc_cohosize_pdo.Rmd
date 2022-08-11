@@ -1,0 +1,160 @@
+---
+title: "coho_project"
+output: html_document
+date: '2022-04-29'
+---
+
+```{r setup}
+
+library(rjags)
+library(coda)
+library(dplyr)
+library(ggplot2)
+library(rethinking)
+
+# save the data in a folder called data, where the folder is in your home directory
+coho <- read.csv("~/data/coho_aukbay.csv",header=T)
+covar <- read.csv("~/data/covars_aukbay.csv",header=T)
+# get temp data -- nws??
+# pdo v adults
+
+```
+
+```{r data formatting}
+
+#-------------dat prep------------
+dat <- coho %>% group_by(calendar_year) %>% summarize(catch = sum(c(coho_troll_catch, coho_seine_catch, coho_gillnet_catch, coho_sport_catch)), adult1 = X1.1_mean_length, adult2 = X2.1_mean_length, fresh1 = X1.0_mean_length, fresh2 = X2.0_mean_length, jacks = coho_jack, coho = coho_adult, smolt = total_smolt)
+dat$spring <- covar$gauge_spring
+dat$pdo <- covar$pdo_nov_jan
+
+#-------------exploratory plots--------------
+plot(dat$calendar_year, dat$fresh1) # size decreasing
+plot(dat$calendar_year, dat$fresh2) # size decreasing
+plot(covar$year, covar$pdo_nov_jan) # random?
+plot(covar$year, covar$gauge_spring, ylab = "Spring Condition", xlab = "Year") # stream flow decreasing
+
+```
+
+```{r stan version}
+
+dat$pdo_lag <- lag(dat$pdo) # correspond last year's pdo with this year's fish sizes
+dat2 <- dat[complete.cases(dat$adult1, dat$fresh1, dat$pdo),]
+dat3 <- list(sizeA = dat2$adult1, sizeJ = dat2$fresh1, pdo = (dat2$pdo), n = 1:length(dat$pdo)) # making a list of data for jags to use
+
+mod <- ulam(
+  alist(
+    sizeJ ~ normal(muJ, sigJ), 
+    sizeA ~ normal(muA, sigA), 
+    # sizeJ ~ normal(J, SJ), 
+    # sizeA ~ normal(A, SA), 
+    # pdo_lag ~ normal(0, 5),
+    muJ <- J0 + J1*pdo, 
+    muA <- A0 + A1*pdo, 
+    c(J0) ~ normal(300, 100), 
+    c(A0) ~ normal(600, 100), 
+    J1 ~ normal(0, 1), 
+    A1 ~ normal(-1, 1), 
+    c(sigJ, sigA) ~ exponential(1)
+  ), dat = dat3
+)
+
+precis(mod)
+post <- extract.samples(mod)
+
+x <- dat3$pdo
+plot(NULL, xlim = c(-3, 3), ylim = c(550, 660), ylab = "Marine Adult Salmon Size, t", xlab = "PDO index, t-1")
+points(dat3$pdo, dat3$sizeA)
+for(i in 1:50) {points(x, post$A0[i] + post$A1[i]*x, add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations
+
+x <- dat3$pdo
+plot(NULL, xlim = c(-3, 3), ylim = c(225, 350), ylab = "Freshwater Juvinile Salmon Size, t", xlab = "PDO index, t-1")
+points(dat3$pdo, dat3$sizeJ)
+for(i in 1:50) {points(x, post$J0[i] + post$J1[i]*x, add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations
+
+# with uniformative priors
+mod <- ulam(
+  alist(
+    sizeJ ~ normal(muJ, sigJ), 
+    sizeA ~ normal(muA, sigA), 
+    # sizeJ ~ normal(J, SJ), 
+    # sizeA ~ normal(A, SA), 
+    # pdo_lag ~ normal(0, 5),
+    muJ <- J0 + J1*pdo, 
+    muA <- A0 + A1*pdo, 
+    c(J0) ~ normal(300, 150), 
+    c(A0) ~ normal(600, 300), 
+    J1 ~ normal(0, 10), 
+    A1 ~ normal(0, 10), 
+    c(sigJ, sigA) ~ exponential(10)
+  ), dat = dat3
+)
+
+precis(mod)
+post <- extract.samples(mod)
+
+x <- dat3$pdo
+plot(NULL, xlim = c(-3, 3), ylim = c(550, 660), ylab = "Marine Adult Salmon Size, t", xlab = "PDO index, t-1")
+points(dat3$pdo, dat3$sizeA)
+for(i in 1:50) {points(x, post$A0[i] + post$A1[i]*x, add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations
+
+x <- dat3$pdo
+plot(NULL, xlim = c(-3, 3), ylim = c(225, 350), ylab = "Freshwater Juvinile Salmon Size, t", xlab = "PDO index, t-1")
+points(dat3$pdo, dat3$sizeJ)
+for(i in 1:50) {points(x, post$J0[i] + post$J1[i]*x, add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations
+
+```
+
+```{r rjags ricker with enviro, message=FALSE}
+
+# goal: predict body size using pdo index (of last years)
+
+#-------------data-------------
+dat$pdo_lag <- lag(dat$pdo) # correspond last year's pdo with this year's fish sizes
+dat2 <- dat[2:38, ] # getting rid of NA
+dat3 <- list(size = dat2$fresh1, pdo_index = dat2$pdo_lag, n = 1:length(dat2$pdo_lag)) # making a list of data for jags to use
+
+#-------------priors-------------
+dat3$b0 <- as.vector(c(610, 7)) # means
+dat3$Vb <- matrix(c(0.01, 0, 0, 0.1), nrow = 2) # deviations -- i think you want 1/stdev?
+dat3$s1 <- 0.1
+dat3$s2 <- 0.1
+
+#-------------model-------------
+reg <- "
+model{
+  b ~ dmnorm(b0, Vb)
+  S ~ dgamma(s1, s2)
+  
+  for(i in 1:n) {
+  size[i] ~ dnorm(mu[i], S)
+  mu[i] <- b[1] + b[2]*pdo_index[i]
+  }                                                 
+}" 
+
+# running jags
+j.model <- jags.model(file = textConnection(reg), 
+                      data = dat3,
+                      n.chains = 3)
+
+# coda samples
+jags.out <- coda.samples(model = j.model, 
+                         variable.names = c("b", "S"), 
+                         n.iter = 5000)
+
+#-------------model checking and posterior-------------
+plot(jags.out) # these are model diagnostics: want the trace to be warm, fuzzy catipilers and the density curves to be smooth (but they don't have to be normal -- it might be more likely that higher or lower than average numbers fit the data, for example)
+
+post <- as.matrix(jags.out) # note no burn in. this makes a matrix where the first coloumn is S, the second is b1 (intercept), and the third b2 (slope)
+effectiveSize(jags.out) # model diagnostic: how much sampling was done -- want this number high
+
+expect <- apply(post, 2, mean) # the average values of the posteriors
+
+# plotting the model -- just the expectation, not accounting for varience
+x <- dat3$pdo_index
+# plotting
+plot(NULL, xlim = c(-3, 2), ylim = c(550, 660), ylab = "2 Year Old Fish Size, t", xlab = "PDO index, t-1")
+points(dat3$pdo_index, dat3$size)
+for(i in 1:50) {points(x, post[i, 2] + post[i, 3]*x, add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations
+
+```
+

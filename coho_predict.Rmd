@@ -32,10 +32,10 @@ plot(dat$calendar_year, dat$fresh2) # size decreasing
 plot(dat$calendar_year, dat$jacks) # constant ish until 2015
 plot(dat$calendar_year, dat$coho) # constant ish until 2015
 plot(dat$calendar_year, dat$smolt) # decreasing ish
-plot(dat$calendar_year, dat$catch) # catch decreasing
+plot(dat$calendar_year, dat$catch, ylab = "Total Catch", xlab = "Year") # catch decreasing
 plot(covar$year, covar$hpc_release) # hatchery increasing
 plot(covar$year, covar$pdo_nov_jan) # random?
-plot(covar$year, covar$gauge_spring) # stream flow decreasing
+plot(covar$year, covar$gauge_spring, ylab = "Spring Condition", xlab = "Year") # stream flow decreasing
 plot(dat$coho, dat$smolt) # maybe bev holt? ricker?
 plot(covar$gauge_spring, dat$coho) # increasing
 plot(covar$gauge_spring, dat$smolt) # increasing
@@ -105,7 +105,35 @@ for(i in 1:50) {points(x, (x)*(exp(post[i, 2]*(1-(x/(post[i, 3]*dat_ord$es))))),
 ```{r stan version plotting posterior, message=FALSE}
 
 #-------------data-----------
-dat2 <- list(Co = dat$coho, Sm = dat$smolt, ES = dat$spring-21)
+dat$coho_lag <- lag(dat$coho)
+dat2 <- list(Co = dat$coho_lag[2:40], Sm = dat$smolt[2:40], ES = (lag(dat$spring)-21)[2:40])
+
+#-------------model 0-----------
+mod0 <- ulam(
+  alist(
+    
+    # outcome 
+    Sm ~ dnorm(mu, sig),
+    # priors
+    mu <- b1*Co + b2, 
+    sig ~ dexp(1),
+    # hyper priors
+    b1 ~ normal(0, 10),
+    b2 ~ normal(4000, 500)
+  ), data = dat2, chains = 1, iter = 4000, log_lik = TRUE
+)
+
+precis(mod0) # not great sampling -- increasing number of chains makes worse
+post <- extract.samples(mod0)
+post <- data.frame(S = post$sig, a = post$a, b = post$b)
+expect <- apply(post, 2, mean) # means -- recall here sig is stdev, in jags sig is precision (and way worse, but more samples)
+
+dat_ord <- arrange(dat, coho_lag)
+x <- dat_ord$coho_lag[2:40]
+# plotting
+plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
+points(dat2$Co, dat2$Sm)
+for(i in 1:50) {points(x, post$b1[i]*x + post$b2[i], add=TRUE, col = col.alpha("red", 0.2))} # set of posterior expectations... okay
 
 #-------------model 1-----------
 mod1 <- ulam(
@@ -127,8 +155,8 @@ post <- extract.samples(mod1)
 post <- data.frame(S = post$sig, a = post$a, b = post$b)
 expect <- apply(post, 2, mean) # means -- recall here sig is stdev, in jags sig is precision (and way worse, but more samples)
 
-dat_ord <- arrange(dat, coho)
-x <- dat_ord$coho
+dat_ord <- arrange(dat, coho_lag)
+x <- dat_ord$coho_lag[2:40]
 # plotting
 plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
 points(dat2$Co, dat2$Sm)
@@ -154,9 +182,9 @@ post <- extract.samples(mod2)
 post <- data.frame(S = post$sig, a = post$a, b = post$b)
 expect <- apply(post, 2, mean) # means -- recall here sig is stdev, in jags sig is precision (and way worse, but more samples)
 
-dat_ord <- arrange(dat, coho)
-dat_ord$es <- dat_ord$spring-21
-x <- dat_ord$coho
+dat_ord <- arrange(dat, coho_lag)
+dat_ord$es <- lag(dat_ord$spring)-21
+x <- dat_ord$coho_lag
 # plotting
 plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
 points(dat2$Co, dat2$Sm)
@@ -167,7 +195,7 @@ hist(rnorm(length(post$b), 4000, 100), col = col.alpha("red"), xlim = c(3500, 45
 hist(post$b, add = TRUE, col = col.alpha("blue"))
 
 #-------------model 3----------
-dat2 <- list(Co = dat$coho, Sm = dat$smolt, ES = dat$spring-21, id = 1:length(dat$coho))
+dat2 <- list(Co = dat$coho_lag[2:40], Sm = dat$smolt[2:40], ES = (lag(dat$spring)-21)[2:40], id = 1:39)
 
 mod3 <- ulam(
   alist(
@@ -189,20 +217,20 @@ mod3 <- ulam(
 precis(mod3) # not great sampling -- increasing number of chains makes worse
 post <- extract.samples(mod3)
 
-dat_ord <- arrange(dat, coho)
-dat_ord$es <- dat_ord$spring-21
-dat_ord$z <- expect_z
-x <- dat_ord$coho
+dat_ord <- arrange(dat, coho_lag)
+dat_ord$es <- lag(dat_ord$spring)-21
+x <- dat_ord$coho_lag
 # plotting
 plot(NULL, xlim = c(100, 1600), ylim = c(0, 12000), xlab = "Adult Spawners", ylab = "Smolt Recruits")
 points(dat2$Co, dat2$Sm)
-for(j in 1:40) {
+for(j in 1:39) {
   for(i in 1:50) {points(x[j], (x[j])*(exp(post$a[i]*(1-(x[j]/(post$b[i]*dat_ord$es[j]))))) + post$z[i, j], add=TRUE, col = col.alpha("red", 0.2))
   }# set of posterior expectations... okay
 }
 
 #-------------aic model comp: model 1 & 2----------
-compare(mod1, mod2, mod3)
+compare(mod0, mod1)
+compare(mod2, mod3)
 
 # r2 is 1-var(residuals)/var(data)
 dat_ord <- arrange(dat, coho)
@@ -238,6 +266,136 @@ expect_smolt[i] <- (x)*(exp(expect_a*(1-(x/(expect_b*dat_ord$es))))) + expect_z_
 }
 resid3 <- dat_ord$smolt - expect_smolt
 sE3 <- sd(resid3)/sqrt(length(resid3)) # 277.2
+
+```
+
+```{r body size}
+
+#-------over time--------------
+
+dat <- coho %>% group_by(calendar_year) %>% summarize(catch = sum(c(coho_troll_catch, coho_seine_catch, coho_gillnet_catch, coho_sport_catch)), fresh1 = X1.1_mean_length, fresh2 = X2.1_mean_length, jacks = coho_jack, coho = coho_adult, smolt = total_smolt)
+dat$spring <- covar$gauge_spring
+dat$lag2_catch <- lag(dat$catch, 2)
+dat$lag3_catch <- lag(dat$catch, 3)
+dat$lag_spring <- lag(dat$spring)
+dat$lag2_spring <- lag(dat$spring, 2)
+dat <- dat %>% mutate(parents = (fresh1 + fresh2)/2)
+dat$lag2_parents <- lag(dat$parents, 2)
+dat$lag3_parents <- lag(dat$parents, 3)
+
+dat2 <- list(fresh1 = dat$fresh1, fresh2 = dat$fresh2, lag2_parents = dat$lag2_parents, lag3_parents = dat$lag3_parents, lag2_catch = standardize(dat$lag2_catch), lag3_catch = standardize(dat$lag3_catch), lag_spring = standardize(dat$lag_spring), lag2_spring = standardize(dat$lag2_spring))
+
+modBS <- ulam(
+  alist(
+    # outcome 
+    fresh1 ~ dnorm(mu1, sig1),
+    fresh2 ~ dnorm(mu2, sig2),
+    # process model
+    mu1 <- lag2_parents + b1*lag2_catch + b2*lag_spring, 
+    mu2 <- lag3_parents + c1*lag3_catch + c2*lag_spring + c3*lag2_spring,
+    # missing data imputation
+    fresh1 ~ dnorm(muBS, sigBS), 
+    fresh2 ~ dnorm(muBS, sigBS), 
+    lag2_parents ~ dnorm(muBS, sigBS), 
+    lag3_parents ~ dnorm(muBS, sigBS), 
+    lag2_catch ~ dnorm(muC, sigC), 
+    lag3_catch ~ dnorm(muC, sigC), 
+    lag_spring ~ dnorm(muS, sigS), 
+    lag2_spring ~ dnorm(muS, sigS),
+    muBS ~ dnorm(600, 100), 
+    sigBS ~ dexp(1), 
+    muC ~ dnorm(0, 1), 
+    sigC ~ dexp(1), 
+    muS ~ dnorm(0, 1), 
+    sigS ~ dexp(1),
+    # priors
+    sig1 ~ dexp(1),
+    sig2 ~ dexp(1),
+    # hyper priors
+    # b0 ~ dnorm(1, 0.1),
+    b1 ~ dnorm(-5, 5),
+    b2 ~ dnorm(5, 5),
+    # c0 ~ dnorm(1, 0.1),
+    c1 ~ dnorm(-5, 5),
+    c2 ~ dnorm(5, 5), 
+    c3 ~ dnorm(5, 5)
+    # c_er[id] ~ dnorm(c_mu, c_sig),
+    # c_mu ~ dnorm(0, 1),
+    # c_sig ~ dexp(1)
+  ), data = dat2, chains = 1, iter = 4000
+)
+
+post <- extract.samples(modBS)
+plot(dat$calendar_year, dat$fresh1, ylim = c(500, 700), ylab = "2 Year Old Fish Size", xlab = "Year")
+x <- dat$calendar_year
+for (j in 4:38) {
+for (i in 20:50) {
+points(x[j], dat2$lag2_parents[j] + post$b1[i]*dat2$lag2_catch[j] + post$b2[i]*dat2$lag_spring[j], add=TRUE, col = col.alpha("red", 0.2))
+}}
+
+#post$b0[i]*
+
+plot(dat$calendar_year, dat$fresh2, ylim = c(500, 700), ylab = "3 Year Old Fish Size", xlab = "Year")
+x <- dat$calendar_year
+for (j in 4:38) {
+for (i in 20:50) {
+points(x[j],
+       dat2$lag3_parents[j] + post$c1[i]*dat2$lag3_catch[j] + post$c2[i]*dat2$lag_spring[j] + post$c3[i]*dat2$lag2_spring[j], 
+       add=TRUE, col = col.alpha("red", 0.2))
+}}
+
+#------------no time-------------
+
+dat <- dat[4:38, ]
+dat2 <- list(fresh1 = dat$fresh1, fresh2 = dat$fresh2, lag2_parents = dat$lag2_parents, lag3_parents = dat$lag3_parents, lag2_catch = standardize(dat$lag2_catch), lag3_catch = standardize(dat$lag3_catch), lag_spring = standardize(dat$lag_spring), lag2_spring = standardize(dat$lag2_spring))
+
+modBS_noP <- ulam(
+  alist(
+    # outcome 
+    fresh1 ~ dnorm(mu1, sig1),
+    fresh2 ~ dnorm(mu2, sig2),
+    # process model
+    mu1 <- b0 + b1*lag2_catch + b2*lag_spring, 
+    mu2 <- c0 + c1*lag3_catch + c2*lag_spring + c3*lag2_spring,
+    # priors
+    sig1 ~ dexp(1),
+    sig2 ~ dexp(1),
+    # hyper priors
+    b0 ~ dnorm(600, 100),
+    b1 ~ dnorm(-5, 5),
+    b2 ~ dnorm(5, 5),
+    # b_er[id] ~ dnorm(b_mu, b_sig),
+    # b_mu ~ dnorm(0, 1),
+    # b_sig ~ dexp(1),
+    c0 ~ dnorm(600, 100),
+    c1 ~ dnorm(-5, 5),
+    c2 ~ dnorm(5, 5), 
+    c3 ~ dnorm(5, 5)
+    # c_er[id] ~ dnorm(c_mu, c_sig),
+    # c_mu ~ dnorm(0, 1),
+    # c_sig ~ dexp(1)
+  ), data = dat2, chains = 1, iter = 4000
+)
+
+pst <- extract.samples(modBS_noP)
+plot(dat2$lag2_catch, dat2$fresh1, ylim = c(550, 650), ylab = "2 Year Old Fish Size", xlab = "Fishing Catch (standardized)")
+x <- dat2$lag2_catch
+for (j in 1:35) {
+for (i in 20:50) {
+points(x[j],
+       pst$b0[i] + pst$b1[i]*dat2$lag2_catch[j] + pst$b2[i]*dat2$lag_spring[j], 
+       add=TRUE, col = col.alpha("red", 0.2))
+}}
+
+plot(dat2$lag2_catch, dat2$fresh2, ylim = c(580, 660), ylab = "3 Year Old Fish Size", xlab = "Fishing Catch (standardized)")
+x <- dat2$lag2_catch
+for (j in 1:35) {
+for (i in 20:50) {
+points(x[j],
+       pst$c0[i] + pst$c1[i]*dat2$lag3_catch[j] + pst$c2[i]*dat2$lag_spring[j] + pst$c3[i]*dat2$lag2_spring[j], 
+       add=TRUE, col = col.alpha("red", 0.2))
+}}
+
 
 ```
 
